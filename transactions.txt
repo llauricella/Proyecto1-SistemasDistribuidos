@@ -1,0 +1,9 @@
+TX001 Alice->Bob 25
+TX002 Bob->Carla 10
+TX003 Daniela->Eva 70
+TX004 Frank->Grace 18
+TX005 Hector->Isabella 40
+TX006 Julia->Kevin 9
+TX007 Laura->Mario 33
+TX008 Nora->Oscar 14
+TX009 Pedro->Queen 55

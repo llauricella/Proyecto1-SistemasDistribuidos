@@ -4,7 +4,6 @@ import socket
 import threading
 import time
 from typing import Dict, List
-
 from blockchain import Block, GENESIS_HASH, validate_block
 from protocol import ConnectionClosed, JsonLineReader, encode_business_message, parse_business_message, send_json
 
@@ -27,12 +26,17 @@ class ValidatorClient:
     def last_hash(self) -> str:
         return self.ledger[-1].hash if self.ledger else GENESIS_HASH
 
+    def announce_presence(self) -> None:
+        """Anuncia al resto que este validador está activo (descubrimiento de presencia)."""
+        send_json(self.sock, {"type": "chat", "text": encode_business_message({"kind": "HELLO", "node": self.name})})
+
     def start(self) -> None:
         self.running.set()
         self.sock = socket.create_connection((self.host, self.port))
         self.reader = JsonLineReader(self.sock)
         send_json(self.sock, {"type": "register", "name": self.name})
         print(f"[{self.name}] Conectado al servidor", flush=True)
+        self.announce_presence()
 
         try:
             while self.running.is_set():
@@ -49,10 +53,17 @@ class ValidatorClient:
             payload = parse_business_message(str(event.get("text", "")))
             if payload:
                 self.handle_business_message(event.get("from", ""), payload)
+
         elif event_type == "chat":
             payload = parse_business_message(str(event.get("text", "")))
-            if payload and payload.get("kind") == "CONSENSUS_REACHED":
-                self.handle_consensus(payload)
+            if payload:
+                kind = payload.get("kind")
+                if kind == "CONSENSUS_REACHED":
+                    self.handle_consensus(payload)
+                elif kind == "WHO":
+                    # El monitor pregunta quién está activo: respondemos con presencia.
+                    self.announce_presence()
+
         elif event_type == "system":
             print(f"[{self.name}] SISTEMA: {event.get('text')}", flush=True)
         elif event_type == "error":
@@ -65,12 +76,9 @@ class ValidatorClient:
         block = Block.from_dict(payload["block"])
         self.pending[block.id] = block
         print(f"[{self.name}] Bloque recibido por privado desde {sender}: {block.id}", flush=True)
-
         if self.delay > 0:
             time.sleep(self.delay)
-
         is_valid, errors = validate_block(block, self.last_hash, self.difficulty)
-
         if self.fault_rate > 0 and random.random() < self.fault_rate:
             is_valid = not is_valid
             errors.append("fallo simulado: voto invertido")
@@ -84,6 +92,7 @@ class ValidatorClient:
             "errors": errors,
             "timestamp": time.time(),
         }
+
         send_json(self.sock, {"type": "chat", "text": encode_business_message(vote)})
         print(f"[{self.name}] Voto emitido: {vote['vote']} para {block.id}", flush=True)
 
@@ -123,4 +132,3 @@ if __name__ == "__main__":
         fault_rate=args.fault_rate,
         delay=args.delay,
     ).start()
-

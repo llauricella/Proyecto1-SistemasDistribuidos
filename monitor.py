@@ -1,6 +1,6 @@
 import argparse, socket, sys, threading, time
 from dataclasses import dataclass, field
-from typing import Dict, List, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from blockchain import Block, GENESIS_HASH, chunk_transactions, load_transactions, make_block
 from protocol import ConnectionClosed, JsonLineReader, encode_business_message, parse_business_message, send_json
@@ -10,6 +10,7 @@ from protocol import ConnectionClosed, JsonLineReader, encode_business_message, 
 class ConsensusRound:
     block: Block
     started_at: float
+    quorum: int
     votes: Dict[str, str] = field(default_factory=dict)
     errors: Dict[str, List[str]] = field(default_factory=dict)
     decided: bool = False
@@ -24,6 +25,7 @@ class MonitorClient:
         difficulty: int,
         block_size: int,
         timeout: float,
+        observer: Optional[Callable[[str, dict], None]] = None,
     ):
         self.name = "Monitor"
         self.host = host
@@ -32,17 +34,35 @@ class MonitorClient:
         self.difficulty = difficulty
         self.block_size = block_size
         self.timeout = timeout
+        self.observer = observer
         self.sock: socket.socket
         self.reader: JsonLineReader
         self.ledger: List[Block] = []
         self.rounds: Dict[str, ConsensusRound] = {}
         self.connected_nodes: Set[str] = set()
+        self.active_validators: Set[str] = set()
         self.lock = threading.Lock()
         self.running = threading.Event()
 
+    # ----- Observador (para GUI). No afecta la salida de consola. -----
+    def _emit(self, kind: str, **data) -> None:
+        if self.observer:
+            try:
+                self.observer(kind, data)
+            except Exception:
+                pass
+
+    def _log(self, text: str) -> None:
+        print(text, flush=True)
+        self._emit("log", text=text)
+
     @property
     def quorum(self) -> int:
-        return (len(self.validators) // 2) + 1
+        """Quórum dinámico: mayoría simple sobre validadores activos (configurados y conectados)."""
+        base = self.active_validators & set(self.validators)
+        if not base:
+            base = set(self.validators)
+        return (len(base) // 2) + 1
 
     @property
     def last_hash(self) -> str:
@@ -55,7 +75,10 @@ class MonitorClient:
         send_json(self.sock, {"type": "register", "name": self.name})
         listener = threading.Thread(target=self.listen, daemon=True)
         listener.start()
-        print(f"[MONITOR] Conectado. Validadores configurados={self.validators}. Quórum={self.quorum}", flush=True)
+        # Descubrimiento de presencia: pregunta quién está activo.
+        send_json(self.sock, {"type": "chat", "text": encode_business_message({"kind": "WHO"})})
+        self._log(f"[MONITOR] Conectado. Validadores configurados={self.validators}. Quórum={self.quorum}")
+        self._emit("connected", validators=list(self.validators), quorum=self.quorum)
 
     def listen(self) -> None:
         try:
@@ -63,7 +86,7 @@ class MonitorClient:
                 event = self.reader.read()
                 self.handle_event(event)
         except ConnectionClosed:
-            print("[MONITOR] Conexión cerrada por el servidor", flush=True)
+            self._log("[MONITOR] Conexión cerrada por el servidor")
         finally:
             self.running.clear()
 
@@ -73,22 +96,46 @@ class MonitorClient:
             payload = parse_business_message(str(event.get("text", "")))
             if payload and payload.get("kind") == "VOTE":
                 self.handle_vote(payload)
+            elif payload and payload.get("kind") == "HELLO":
+                self.register_active(str(payload.get("node", "")))
             else:
-                print(f"[CHAT] {event.get('from')}: {event.get('text')}", flush=True)
+                self._log(f"[CHAT] {event.get('from')}: {event.get('text')}")
         elif event_type == "system":
             text = str(event.get("text", ""))
             self.update_connected_nodes(text)
-            print(f"[SISTEMA] {text}", flush=True)
+            self._log(f"[SISTEMA] {text}")
         elif event_type == "error":
-            print(f"[ERROR] {event.get('text')}", flush=True)
+            self._log(f"[ERROR] {event.get('text')}")
         elif event_type == "private":
-            print(f"[PRIVADO] {event.get('from')}: {event.get('text')}", flush=True)
+            self._log(f"[PRIVADO] {event.get('from')}: {event.get('text')}")
+
+    def register_active(self, node: str) -> None:
+        if not node:
+            return
+        with self.lock:
+            self.connected_nodes.add(node)
+            if node in self.validators:
+                self.active_validators.add(node)
+        self._emit("nodes", connected=sorted(self.connected_nodes),
+                   active=sorted(self.active_validators), quorum=self.quorum)
 
     def update_connected_nodes(self, text: str) -> None:
-        if text.endswith(" se conectó"):
-            self.connected_nodes.add(text.replace(" se conectó", ""))
-        elif text.endswith(" se desconectó"):
-            self.connected_nodes.discard(text.replace(" se desconectó", ""))
+        changed = False
+        with self.lock:
+            if text.endswith(" se conectó"):
+                node = text.replace(" se conectó", "")
+                self.connected_nodes.add(node)
+                if node in self.validators:
+                    self.active_validators.add(node)
+                changed = True
+            elif text.endswith(" se desconectó"):
+                node = text.replace(" se desconectó", "")
+                self.connected_nodes.discard(node)
+                self.active_validators.discard(node)
+                changed = True
+        if changed:
+            self._emit("nodes", connected=sorted(self.connected_nodes),
+                       active=sorted(self.active_validators), quorum=self.quorum)
 
     def handle_vote(self, payload: dict) -> None:
         block_id = str(payload.get("block_id"))
@@ -100,23 +147,27 @@ class MonitorClient:
             if round_state is None or round_state.decided:
                 return
             if validator not in self.validators:
-                print(f"[MONITOR] Voto ignorado de nodo no configurado: {validator}", flush=True)
+                self._log(f"[MONITOR] Voto ignorado de nodo no configurado: {validator}")
                 return
 
             round_state.votes[validator] = vote
             round_state.errors[validator] = [str(err) for err in payload.get("errors", [])]
             ok_votes = sum(1 for value in round_state.votes.values() if value == "BLOQUE_OK")
             bad_votes = sum(1 for value in round_state.votes.values() if value == "BLOQUE_INVALIDO")
+            quorum = self.quorum
+            round_state.quorum = quorum
 
-            print(
+            self._log(
                 f"[MONITOR] Voto recibido {validator}->{vote} para {block_id}. "
-                f"OK={ok_votes}, INVALIDO={bad_votes}, requeridos={self.quorum}",
-                flush=True,
+                f"OK={ok_votes}, INVALIDO={bad_votes}, requeridos={quorum}"
             )
+            self._emit("vote", block_id=block_id, validator=validator, vote=vote,
+                       ok=ok_votes, bad=bad_votes, quorum=quorum,
+                       errors=round_state.errors[validator])
 
-            if ok_votes >= self.quorum:
+            if ok_votes >= quorum:
                 self.accept_round(round_state)
-            elif bad_votes >= self.quorum:
+            elif bad_votes >= quorum:
                 self.reject_round(round_state, "Mayoría de votos inválidos")
 
     def accept_round(self, round_state: ConsensusRound) -> None:
@@ -141,10 +192,13 @@ class MonitorClient:
         send_json(self.sock, {"type": "chat", "text": encode_business_message(announcement)})
 
         if fork:
-            print(f"[MONITOR] FORK detectado: {block.id} no fue insertado.", flush=True)
+            self._log(f"[MONITOR] FORK detectado: {block.id} no fue insertado.")
         else:
-            print(f"[MONITOR] CONSENSO ALCANZADO para {block.id}. Latencia={latency:.4f}s", flush=True)
+            self._log(f"[MONITOR] CONSENSO ALCANZADO para {block.id}. Latencia={latency:.4f}s")
             self.print_ledger()
+
+        self._emit("decision", announcement=announcement, accepted=not fork, fork=fork,
+                   reason=None, ledger=[b.to_dict() for b in self.ledger])
 
     def reject_round(self, round_state: ConsensusRound, reason: str) -> None:
         round_state.decided = True
@@ -160,15 +214,20 @@ class MonitorClient:
             "reason": reason,
         }
         send_json(self.sock, {"type": "chat", "text": encode_business_message(announcement)})
-        print(f"[MONITOR] Bloque {round_state.block.id} rechazado: {reason}", flush=True)
+        self._log(f"[MONITOR] Bloque {round_state.block.id} rechazado: {reason}")
         for validator, errors in round_state.errors.items():
             if errors:
-                print(f"  - {validator}: {'; '.join(errors)}", flush=True)
+                self._log(f"  - {validator}: {'; '.join(errors)}")
+
+        self._emit("decision", announcement=announcement, accepted=False, fork=False,
+                   reason=reason, ledger=[b.to_dict() for b in self.ledger])
 
     def load_and_process(self, path: str) -> None:
         transactions = load_transactions(path)
         groups = chunk_transactions(transactions, self.block_size)
-        print(f"[MONITOR] {len(transactions)} transacciones cargadas en {len(groups)} bloques.", flush=True)
+
+        self._log(f"[MONITOR] {len(transactions)} transacciones cargadas en {len(groups)} bloques.")
+        self._emit("loaded", n_tx=len(transactions), n_blocks=len(groups))
 
         for index, group in enumerate(groups, start=len(self.ledger) + 1):
             block = make_block(index, group, self.last_hash, self.difficulty)
@@ -176,7 +235,7 @@ class MonitorClient:
             self.wait_for_decision(block.id)
 
     def propose_block(self, block: Block) -> None:
-        round_state = ConsensusRound(block=block, started_at=time.time())
+        round_state = ConsensusRound(block=block, started_at=time.time(), quorum=self.quorum)
         with self.lock:
             self.rounds[block.id] = round_state
 
@@ -187,7 +246,8 @@ class MonitorClient:
             "created_by": self.name,
         }
 
-        print(f"[MONITOR] Proponiendo {block.id} hash={block.hash[:16]}... a {self.validators}", flush=True)
+        self._log(f"[MONITOR] Proponiendo {block.id} hash={block.hash[:16]}... a {self.validators}")
+        self._emit("proposal", block=block.to_dict(), validators=list(self.validators), quorum=round_state.quorum)
         for validator in self.validators:
             send_json(
                 self.sock,
@@ -209,16 +269,15 @@ class MonitorClient:
                 self.reject_round(round_state, f"Timeout de {self.timeout}s sin quórum")
 
     def print_ledger(self) -> None:
-        print("\n[LEDGER GLOBAL]", flush=True)
+        self._log("\n[LEDGER GLOBAL]")
         if not self.ledger:
-            print("  Ledger vacío", flush=True)
+            self._log("  Ledger vacío")
         for position, block in enumerate(self.ledger, start=1):
-            print(
+            self._log(
                 f"  {position}. {block.id} hash={block.hash[:16]} prev={block.previous_hash[:16]} "
-                f"tx={len(block.transactions)} nonce={block.nonce}",
-                flush=True,
+                f"tx={len(block.transactions)} nonce={block.nonce}"
             )
-        print("", flush=True)
+        self._log("")
 
     def repl(self) -> None:
         print("Comandos: cargar <archivo>, estado, salir", flush=True)
@@ -280,4 +339,3 @@ if __name__ == "__main__":
         monitor.sock.close()
     else:
         monitor.repl()
-
