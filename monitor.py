@@ -230,6 +230,8 @@ class MonitorClient:
         self._emit("loaded", n_tx=len(transactions), n_blocks=len(groups))
 
         for index, group in enumerate(groups, start=len(self.ledger) + 1):
+            if not self.running.is_set():
+                break
             block = make_block(index, group, self.last_hash, self.difficulty)
             self.propose_block(block)
             self.wait_for_decision(block.id)
@@ -256,12 +258,15 @@ class MonitorClient:
 
     def wait_for_decision(self, block_id: str) -> None:
         deadline = time.time() + self.timeout
-        while time.time() < deadline:
+        while time.time() < deadline and self.running.is_set():
             with self.lock:
                 round_state = self.rounds[block_id]
                 if round_state.decided:
                     return
             time.sleep(0.1)
+
+        if not self.running.is_set():
+            return
 
         with self.lock:
             round_state = self.rounds[block_id]

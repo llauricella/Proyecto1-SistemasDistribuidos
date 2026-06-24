@@ -1,0 +1,16 @@
+# CASO 4 - PARSER ROBUSTO (comentarios y lineas en blanco)
+# Demuestra que load_transactions() ignora comentarios (#) y lineas vacias.
+# Solo hay 6 transacciones reales -> 2 bloques (con --block-size 3).
+
+TX001 Alice->Bob 25
+
+# --- lote de la manana ---
+TX002 Bob->Carla 10
+TX003 Daniela->Eva 70
+
+# --- lote de la tarde ---
+
+TX004 Frank->Grace 18
+TX005 Hector->Isabella 40
+TX006 Julia->Kevin 9
+# fin del archivo

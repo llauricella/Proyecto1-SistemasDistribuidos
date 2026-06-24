@@ -1,4 +1,15 @@
+"""
+Dashboard gráfico del Monitor — Sistema de Consenso y Validación de Bloques.
 
+Es una segunda "cara" del nodo Monitor: se conecta al servidor como un cliente
+más y muestra en tiempo real lo que recibe por el socket (ledger, votos, quórum,
+latencia, forks, estado de nodos y log crudo). El servidor y los validadores
+siguen siendo procesos independientes; esta ventana NO añade lógica de negocio
+nueva: reutiliza directamente MonitorClient (monitor.py).
+
+Requiere: pip install pyside6
+Uso:      python gui_monitor.py
+"""
 import sys
 import threading
 from functools import partial
@@ -10,6 +21,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QHBoxLayout, QVBoxLayout, QGridLayout, QFrame, QScrollArea,
     QTabWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QFileDialog, QMessageBox, QGroupBox, QSizePolicy, QProgressBar,
+    QAbstractSpinBox,
 )
 
 from monitor import MonitorClient
@@ -22,18 +34,39 @@ MONO = "Consolas, 'DejaVu Sans Mono', Menlo, monospace"
 STYLE = """
 QMainWindow, QWidget { background: #0f1419; color: #d7dde4; font-size: 13px; }
 QGroupBox {
-    border: 1px solid #243040; border-radius: 8px; margin-top: 14px; padding: 8px;
+    border: 1px solid #243040; border-radius: 8px; margin-top: 10px; padding: 6px;
     font-weight: 600; color: #9fb3c8;
 }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
 QLineEdit, QSpinBox, QDoubleSpinBox {
-    background: #1a2230; border: 1px solid #2b3a4f; border-radius: 6px; padding: 5px 7px;
+    background: #1a2230; border: 1px solid #2b3a4f; border-radius: 6px; padding: 4px 6px;
     selection-background-color: #3b82f6;
+}
+QSpinBox, QDoubleSpinBox { padding-right: 20px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right;
+    width: 16px; border-left: 1px solid #2b3a4f; border-top-right-radius: 6px;
+    background: #232f40;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 16px; border-left: 1px solid #2b3a4f; border-bottom-right-radius: 6px;
+    background: #232f40;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background: #2e3e54; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-bottom: 5px solid #9fb3c8;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 5px solid #9fb3c8;
 }
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #3b82f6; }
 QPushButton {
     background: #1f6feb; color: white; border: none; border-radius: 6px;
-    padding: 7px 14px; font-weight: 600;
+    padding: 6px 11px; font-weight: 600;
 }
 QPushButton:hover { background: #388bfd; }
 QPushButton:disabled { background: #30363d; color: #6e7681; }
@@ -154,7 +187,8 @@ class MonitorDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Monitor · Consenso Distribuido de Bloques")
-        self.resize(900, 580)
+        self.setMinimumSize(820, 540)
+        self.resize(1040, 640)
         self.setStyleSheet(STYLE)
 
         self.monitor: MonitorClient | None = None
@@ -168,6 +202,7 @@ class MonitorDashboard(QMainWindow):
         self.load_worker = None
 
         self._build_ui()
+        self._fit_to_screen()
 
     # ---------------------------- construcción UI ----------------------------
     def _build_ui(self):
@@ -186,7 +221,7 @@ class MonitorDashboard(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 2)
         splitter.setStretchFactor(2, 2)
-        splitter.setSizes([280, 480, 520])
+        splitter.setSizes([220, 360, 380])
         root.addWidget(splitter, 1)
 
         self.status = QLabel("Desconectado")
@@ -198,7 +233,8 @@ class MonitorDashboard(QMainWindow):
     def _build_topbar(self) -> QWidget:
         box = QGroupBox("Conexión del Monitor")
         g = QGridLayout(box)
-        g.setHorizontalSpacing(10)
+        g.setHorizontalSpacing(8)
+        g.setVerticalSpacing(6)
 
         self.in_host = QLineEdit("127.0.0.1")
         self.in_port = QSpinBox(); self.in_port.setRange(1, 65535); self.in_port.setValue(5050)
@@ -207,29 +243,61 @@ class MonitorDashboard(QMainWindow):
         self.in_blocksize = QSpinBox(); self.in_blocksize.setRange(1, 50); self.in_blocksize.setValue(3)
         self.in_timeout = QDoubleSpinBox(); self.in_timeout.setRange(1, 120); self.in_timeout.setValue(10.0)
 
-        self.in_host.setFixedWidth(110)
-        self.in_validators.setMinimumWidth(60)
+        self.in_host.setFixedWidth(95)
+        self.in_port.setFixedWidth(82)
+        self.in_validators.setMinimumWidth(95)
+        self.in_difficulty.setFixedWidth(72)
+        self.in_blocksize.setFixedWidth(72)
+        self.in_timeout.setFixedWidth(88)
 
         def lbl(t):
             x = QLabel(t); x.setStyleSheet("color:#8b98a8;"); return x
 
+        # Fila 0: campos principales
         g.addWidget(lbl("Host"), 0, 0); g.addWidget(self.in_host, 0, 1)
         g.addWidget(lbl("Puerto"), 0, 2); g.addWidget(self.in_port, 0, 3)
         g.addWidget(lbl("Validadores"), 0, 4); g.addWidget(self.in_validators, 0, 5)
-        g.addWidget(lbl("Dificultad"), 0, 6); g.addWidget(self.in_difficulty, 0, 7)
-        g.addWidget(lbl("Bloque"), 0, 8); g.addWidget(self.in_blocksize, 0, 9)
-        g.addWidget(lbl("Timeout"), 0, 10); g.addWidget(self.in_timeout, 0, 11)
+        # Fila 1: parámetros + botones
+        g.addWidget(lbl("Dificultad"), 1, 0); g.addWidget(self.in_difficulty, 1, 1)
+        g.addWidget(lbl("Bloque"), 1, 2); g.addWidget(self.in_blocksize, 1, 3)
+        g.addWidget(lbl("Timeout"), 1, 4); g.addWidget(self.in_timeout, 1, 5)
 
         self.btn_connect = QPushButton("Conectar")
         self.btn_connect.clicked.connect(self.on_connect)
-        self.btn_load = QPushButton("Cargar txs..")
+        self.btn_load = QPushButton("Cargar")
         self.btn_load.setObjectName("ghost")
         self.btn_load.setEnabled(False)
         self.btn_load.clicked.connect(self.on_load)
-        g.addWidget(self.btn_connect, 0, 12)
-        g.addWidget(self.btn_load, 0, 13)
+        self.btn_reset = QPushButton("Reiniciar")
+        self.btn_reset.setObjectName("danger")
+        self.btn_reset.clicked.connect(self.reset_all)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        btn_row.addWidget(self.btn_connect)
+        btn_row.addWidget(self.btn_load)
+        btn_row.addWidget(self.btn_reset)
+        btn_wrap = QWidget(); btn_wrap.setLayout(btn_row)
+        g.addWidget(btn_wrap, 0, 6, 2, 1)   # ocupa las dos filas, columna derecha
+
         g.setColumnStretch(5, 1)
         return box
+
+    def _fit_to_screen(self):
+        """Mantiene la ventana dentro de la pantalla disponible (evita que se
+        salga en monitores pequeños, p. ej. portátiles de 14\")."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        w = min(self.width(), avail.width() - 40)
+        h = min(self.height(), avail.height() - 60)
+        self.resize(max(self.minimumWidth(), w), max(self.minimumHeight(), h))
+        # recentrar si quedó fuera
+        frame = self.frameGeometry()
+        if not avail.contains(frame):
+            frame.moveCenter(avail.center())
+            self.move(frame.topLeft())
 
     def _build_left_panel(self) -> QWidget:
         wrap = QWidget()
@@ -264,16 +332,26 @@ class MonitorDashboard(QMainWindow):
         # tabla de validadores a lanzar (nombre, fault-rate, delay)
         self.launch_table = QTableWidget(0, 3)
         self.launch_table.setHorizontalHeaderLabels(["Nodo", "Fallo", "Retardo"])
-        self.launch_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.launch_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)        # Nodo se estira
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.launch_table.setColumnWidth(1, 70)
+        self.launch_table.setColumnWidth(2, 70)
         self.launch_table.verticalHeader().setVisible(False)
-        self.launch_table.setMaximumHeight(150)
+        self.launch_table.setMaximumHeight(170)
         v.addWidget(self.launch_table)
+        hint = QLabel("Fallo 0–1 · Retardo en s. Cambia con la rueda del ratón o escribiendo.")
+        hint.setStyleSheet("color:#6e7e90; font-size:11px;")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
 
         row = QHBoxLayout()
         b_add = QPushButton("+ nodo"); b_add.setObjectName("ghost"); b_add.clicked.connect(self.add_launch_row)
+        b_del = QPushButton("− nodo"); b_del.setObjectName("ghost"); b_del.clicked.connect(self.remove_launch_row)
         b_start = QPushButton("Lanzar validadores"); b_start.clicked.connect(self.start_validators)
         b_stop = QPushButton("Detener todo"); b_stop.setObjectName("danger"); b_stop.clicked.connect(self.stop_all)
-        row.addWidget(b_add); row.addWidget(b_start)
+        row.addWidget(b_add); row.addWidget(b_del); row.addWidget(b_start)
         v.addLayout(row)
         v.addWidget(b_stop)
 
@@ -390,6 +468,68 @@ class MonitorDashboard(QMainWindow):
         self.load_worker = LoadWorker(self.monitor, path)
         self.load_worker.done.connect(lambda: self.btn_load.setEnabled(True))
         self.load_worker.start()
+
+    def reset_all(self):
+        """Deja la interfaz como recién abierta: desconecta el monitor, detiene
+        los procesos del lanzador y limpia todos los paneles."""
+        # 1) abortar la carga / cerrar el monitor
+        if self.monitor is not None:
+            self.monitor.running.clear()
+            try:
+                self.monitor.sock.close()
+            except Exception:
+                pass
+        if self.load_worker is not None and self.load_worker.isRunning():
+            self.load_worker.wait(2000)
+        self.monitor = None
+        self.load_worker = None
+        self.connect_worker = None
+
+        # 2) detener servidor y validadores lanzados desde la GUI
+        self.stop_all()
+
+        # 3) limpiar paneles
+        self._clear_panels()
+
+        # 4) volver al estado inicial de la UI
+        self.btn_connect.setEnabled(True)
+        self.btn_load.setEnabled(False)
+        self.status.setText("Desconectado")
+        self.status.setStyleSheet("background:#3d2326; color:#ff7b72;")
+        self.statusBar().showMessage("Interfaz reiniciada. Lista para montar otro caso.")
+        self._fit_to_screen()
+
+    def _clear_panels(self):
+        # ledger
+        while self.ledger_layout.count():
+            item = self.ledger_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.ledger_layout.addStretch()
+        self.ledger_count.setText("0 bloques")
+        # métricas
+        self.metrics.setRowCount(0)
+        # nodos
+        while self.nodes_layout.count():
+            item = self.nodes_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.node_rows.clear()
+        self.lbl_quorum.setText("Quórum requerido: —")
+        # ronda actual
+        while self.votes_box.count():
+            item = self.votes_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.vote_rows = {}
+        self.lbl_round.setText("Sin ronda activa")
+        self.lbl_round_hash.setText("")
+        self.lbl_outcome.setText("")
+        self.lbl_outcome.setStyleSheet("")
+        self.vote_progress.setMaximum(1)
+        self.vote_progress.setValue(0)
+        # log
+        self.log.clear()
 
     # --------------------------- eventos del monitor -------------------------
     def on_event(self, kind: str, data: dict):
@@ -513,8 +653,23 @@ class MonitorDashboard(QMainWindow):
         self.launch_table.setItem(r, 0, QTableWidgetItem(name or f"V{r+1}"))
         fr = QDoubleSpinBox(); fr.setRange(0, 1); fr.setSingleStep(0.05); fr.setDecimals(2)
         dl = QDoubleSpinBox(); dl.setRange(0, 10); dl.setSingleStep(0.1); dl.setDecimals(1)
+        for sb in (fr, dl):
+            # sin flechas: el número usa toda la celda y no se corta en paneles angostos.
+            # Se ajustan con la rueda del ratón o escribiendo.
+            sb.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            sb.setAlignment(Qt.AlignCenter)
+            sb.setStyleSheet("padding:4px 4px;")  # anula el padding-right reservado para flechas
         self.launch_table.setCellWidget(r, 1, fr)
         self.launch_table.setCellWidget(r, 2, dl)
+        self.launch_table.setRowHeight(r, 34)
+
+    def remove_launch_row(self):
+        """Quita la fila seleccionada (o la última si no hay selección)."""
+        r = self.launch_table.currentRow()
+        if r < 0:
+            r = self.launch_table.rowCount() - 1
+        if r >= 0:
+            self.launch_table.removeRow(r)
 
     def toggle_server(self):
         if self.proc_server is None:

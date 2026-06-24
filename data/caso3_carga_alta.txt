@@ -1,0 +1,26 @@
+# CASO 3 - CARGA ALTA (rendimiento / latencia)
+# 21 transacciones -> 7 bloques (con --block-size 3).
+# Pensado para medir latencia por bloque en la pestaña Metricas y ver
+# como crece la cadena en varias rondas. Combinar con --delay en un nodo
+# para observar el impacto de un validador lento.
+TX001 Alice->Bob 25
+TX002 Bob->Carla 10
+TX003 Daniela->Eva 70
+TX004 Frank->Grace 18
+TX005 Hector->Isabella 40
+TX006 Julia->Kevin 9
+TX007 Laura->Mario 33
+TX008 Nora->Oscar 14
+TX009 Pedro->Queen 55
+TX010 Raul->Sara 12
+TX011 Tomas->Ursula 60
+TX012 Victor->Wendy 8
+TX013 Ximena->Yago 47
+TX014 Zoe->Abel 21
+TX015 Bruno->Celia 39
+TX016 Diego->Elena 5
+TX017 Fabio->Gloria 80
+TX018 Hugo->Ines 16
+TX019 Ivan->Java 27
+TX020 Karla->Luis 90
+TX021 Marta->Nestor 3

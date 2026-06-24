@@ -1,0 +1,5 @@
+# CASO 2 - BLOQUE UNICO (caso minimo / borde)
+# 2 transacciones -> 1 solo bloque. El ledger crece de 0 a 1.
+# Util para verificar el encadenamiento desde el bloque genesis.
+TX001 Alice->Bob 100
+TX002 Bob->Carla 40

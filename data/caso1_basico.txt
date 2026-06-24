@@ -1,3 +1,5 @@
+# CASO 1 - BASICO: consenso limpio
+# 9 transacciones -> 3 bloques (con --block-size 3). Todos deben quedar OK.
 TX001 Alice->Bob 25
 TX002 Bob->Carla 10
 TX003 Daniela->Eva 70
